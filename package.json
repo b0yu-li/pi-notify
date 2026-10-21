@@ -1,0 +1,20 @@
+{
+  "name": "pi-notify",
+  "version": "0.1.0",
+  "private": true,
+  "description": "macOS + Ghostty notifications for Pi. Fires on task completion, errors, and questions without adding anything to the model context.",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "README.md",
+    "extensions/index.js"
+  ],
+  "scripts": {
+    "test": "node --test extensions/test/*.test.js"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.js"
+    ]
+  }
+}
