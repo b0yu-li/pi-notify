@@ -24,11 +24,11 @@ pi --extension ./extensions/index.js
 
 ## What you hear and see
 
-| `style` | What you see |
+| `style` | What you see / hear |
 |---------|----------------|
 | `banner` (default) | OSC 777 on this process's terminal only, so Ghostty shows the current session. Notification Center is used only when this process has no terminal. Both go away on their own. |
 | `alert` | A macOS alert dialog that stays until you click OK. |
-| `sound` on | `afplay` of `Glass.aiff` |
+| `sound` on | `afplay` of a per-event system sound: `Glass` (complete), `Basso` (error), `Ping` (question) |
 
 In Ghostty, set `desktop-notifications = true` (the usual default) so banner-style OSC 777 reaches Notification Center. macOS chooses banner versus alert per app in System Settings, not per notice, so `alert` uses a dialog that actually stays instead of Ghostty. This path is macOS-only; other platforms do nothing.
 
@@ -43,12 +43,19 @@ Put a `notify` object in `.pi/settings.json` (trusted projects only), `$PI_CODIN
     "onError": true,
     "onQuestion": true,
     "sound": true,
+    "sounds": {
+      "complete": "Glass",
+      "error": "Basso",
+      "question": "Ping"
+    },
     "style": "banner"
   }
 }
 ```
 
 `onComplete`, `onError`, `onQuestion`, and `sound` default to `true`. `style` defaults to `"banner"`. Set `"style": "alert"` when the notice should stay until you dismiss it. Omit the object to keep the defaults.
+
+`sounds` picks the `afplay` file per event. Use a `/System/Library/Sounds` basename (`"Glass"` or `"Glass.aiff"`) or an absolute path. Defaults are `Glass` / `Basso` / `Ping`.
 
 | Flag | Effect |
 |------|--------|

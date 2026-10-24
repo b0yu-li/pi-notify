@@ -5,7 +5,8 @@
  * are removed. Banner: OSC 777 on this process's terminal (stdout when it is
  * a TTY, otherwise /dev/tty). Notification Center when there is no terminal,
  * and for a finished `/compact` (Ghostty drops OSC during the redraw). Alert:
- * an osascript dialog. Sound: afplay of Glass.aiff.
+ * an osascript dialog. Sound: afplay of a per-event macOS system sound
+ * (Glass / Basso / Ping by default).
  *
  * Handlers only observe lifecycle events. They never call sendMessage,
  * sendUserMessage, appendEntry, or registerTool.
@@ -14,7 +15,7 @@
 
 import { execFile } from "node:child_process";
 import { closeSync, openSync, readFileSync, writeSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { isatty } from "node:tty";
 import os from "node:os";
 
@@ -26,7 +27,14 @@ const DEFAULTS = {
   style: "banner",
 };
 
-const GLASS = "/System/Library/Sounds/Glass.aiff";
+const SOUNDS_DIR = "/System/Library/Sounds";
+
+/** Default afplay targets per event kind. */
+export const DEFAULT_SOUNDS = {
+  complete: join(SOUNDS_DIR, "Glass.aiff"),
+  error: join(SOUNDS_DIR, "Basso.aiff"),
+  question: join(SOUNDS_DIR, "Ping.aiff"),
+};
 
 /**
  * Read a settings object. Project scope is skipped unless `trusted` is true,
@@ -72,6 +80,31 @@ function pickBool(value, fallback) {
   return typeof value === "boolean" ? value : fallback;
 }
 
+/**
+ * Resolve a sound setting to an absolute path. Accepts an absolute path, a
+ * system sound basename (`"Basso"` / `"Basso.aiff"`), or falls back.
+ */
+export function resolveSound(value, fallback) {
+  const fallbackPath = typeof fallback === "string" && fallback ? fallback : DEFAULT_SOUNDS.complete;
+  if (typeof value !== "string") return fallbackPath;
+  const trimmed = value.trim();
+  if (!trimmed) return fallbackPath;
+  if (isAbsolute(trimmed)) return trimmed;
+  const name = trimmed.toLowerCase().endsWith(".aiff") ? trimmed : `${trimmed}.aiff`;
+  return join(SOUNDS_DIR, name);
+}
+
+function resolveSounds(userSounds) {
+  const extra = userSounds && typeof userSounds === "object" && !Array.isArray(userSounds)
+    ? userSounds
+    : {};
+  return {
+    complete: resolveSound(extra.complete, DEFAULT_SOUNDS.complete),
+    error: resolveSound(extra.error, DEFAULT_SOUNDS.error),
+    question: resolveSound(extra.question, DEFAULT_SOUNDS.question),
+  };
+}
+
 export function resolveConfig(user) {
   const extra = user && typeof user === "object" && !Array.isArray(user) ? user : {};
   return {
@@ -79,6 +112,7 @@ export function resolveConfig(user) {
     onError: pickBool(extra.onError, DEFAULTS.onError),
     onQuestion: pickBool(extra.onQuestion, DEFAULTS.onQuestion),
     sound: pickBool(extra.sound, DEFAULTS.sound),
+    sounds: resolveSounds(extra.sounds),
     style: normalizeStyle(extra.style),
   };
 }
@@ -157,10 +191,15 @@ export function notify(title, body, io = {}) {
   }
 }
 
+/**
+ * Play a notification sound on macOS. `io.sound` is an absolute path; when
+ * omitted, Glass (complete) is used.
+ */
 export function playSound(io = {}) {
   if (process.platform !== "darwin") return;
+  const file = typeof io.sound === "string" && io.sound ? io.sound : DEFAULT_SOUNDS.complete;
   try {
-    (io.run ?? defaultRun)("afplay", [GLASS]);
+    (io.run ?? defaultRun)("afplay", [file]);
   } catch {
     // best-effort
   }
@@ -201,7 +240,8 @@ export default function notifyExtension(pi, opts = {}) {
       if (kind === "question" && !cfg.onQuestion) return;
       try { doNotify(title, body, { style: cfg.style, ...extra }); } catch { /* best-effort */ }
       if (cfg.sound) {
-        try { doSound(); } catch { /* best-effort */ }
+        const sound = cfg.sounds?.[kind] ?? DEFAULT_SOUNDS.complete;
+        try { doSound({ sound }); } catch { /* best-effort */ }
       }
     } catch {
       // never escape an event handler

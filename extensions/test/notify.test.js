@@ -6,10 +6,12 @@ import test from "node:test";
 
 import notifyExtension, {
   appleScriptEscape,
+  DEFAULT_SOUNDS,
   notify,
   playSound,
   readSettingsKey,
   resolveConfig,
+  resolveSound,
   sanitizeOsc,
   sessionTitle,
 } from "../index.js";
@@ -21,6 +23,24 @@ test("resolveConfig merges user config over defaults", () => {
   assert.equal(cfg.onError, false);
   assert.equal(cfg.sound, false);
   assert.equal(cfg.style, "banner");
+  assert.deepEqual(cfg.sounds, DEFAULT_SOUNDS);
+});
+
+test("resolveSound accepts basename, .aiff name, and absolute path", () => {
+  assert.equal(resolveSound("Basso"), "/System/Library/Sounds/Basso.aiff");
+  assert.equal(resolveSound("Ping.aiff"), "/System/Library/Sounds/Ping.aiff");
+  assert.equal(resolveSound("/tmp/custom.aiff"), "/tmp/custom.aiff");
+  assert.equal(resolveSound("  ", DEFAULT_SOUNDS.error), DEFAULT_SOUNDS.error);
+  assert.equal(resolveSound(null, DEFAULT_SOUNDS.question), DEFAULT_SOUNDS.question);
+});
+
+test("resolveConfig applies per-event sound overrides", () => {
+  const cfg = resolveConfig({
+    sounds: { complete: "Hero", error: "/tmp/fail.aiff", question: "Tink.aiff" },
+  });
+  assert.equal(cfg.sounds.complete, "/System/Library/Sounds/Hero.aiff");
+  assert.equal(cfg.sounds.error, "/tmp/fail.aiff");
+  assert.equal(cfg.sounds.question, "/System/Library/Sounds/Tink.aiff");
 });
 
 test("resolveConfig accepts alert and rejects other style values", () => {
@@ -131,11 +151,15 @@ test("notify and playSound no-op off darwin", () => {
   assert.equal(runs.length, 0);
 });
 
-test("playSound asks afplay for Glass.aiff on darwin", () => {
+test("playSound asks afplay for the requested sound on darwin", () => {
   if (process.platform !== "darwin") return;
   const runs = [];
   playSound({ run: (cmd, args) => runs.push([cmd, args]) });
-  assert.deepEqual(runs, [["afplay", ["/System/Library/Sounds/Glass.aiff"]]]);
+  playSound({ sound: DEFAULT_SOUNDS.error, run: (cmd, args) => runs.push([cmd, args]) });
+  assert.deepEqual(runs, [
+    ["afplay", [DEFAULT_SOUNDS.complete]],
+    ["afplay", [DEFAULT_SOUNDS.error]],
+  ]);
 });
 
 test("sanitizeOsc and appleScriptEscape keep payloads inside their grammars", () => {
@@ -288,10 +312,10 @@ test("ui_prompt_start uses a fallback title", () => {
 });
 
 test("sound follows config and is skipped when notifications are suppressed", () => {
-  let sounds = 0;
-  const handlers = harness({ soundSpy: () => { sounds += 1; } });
+  const sounds = [];
+  const handlers = harness({ soundSpy: (io) => { sounds.push(io?.sound); } });
   handlers.agent_settled();
-  assert.equal(sounds, 1);
+  assert.deepEqual(sounds, [DEFAULT_SOUNDS.complete]);
 
   const dir = mkdtempSync(join(tmpdir(), "pi-notify-"));
   mkdirSync(join(dir, ".pi"), { recursive: true });
@@ -299,7 +323,20 @@ test("sound follows config and is skipped when notifications are suppressed", ()
   handlers.session_start({}, { cwd: dir, isProjectTrusted: () => true });
   handlers.turn_start();
   handlers.agent_settled();
-  assert.equal(sounds, 1);
+  assert.equal(sounds.length, 1);
+});
+
+test("each event kind plays its own default sound", () => {
+  const sounds = [];
+  const handlers = harness({ soundSpy: (io) => { sounds.push(io?.sound); } });
+  handlers.agent_settled();
+  handlers.tool_result({ isError: true });
+  handlers.ui_prompt_start({ title: "Pick" });
+  assert.deepEqual(sounds, [
+    DEFAULT_SOUNDS.complete,
+    DEFAULT_SOUNDS.error,
+    DEFAULT_SOUNDS.question,
+  ]);
 });
 
 test("readSettingsKey ignores untrusted project settings and reads global", () => {
