@@ -6,14 +6,18 @@ import test from "node:test";
 
 import notifyExtension, {
   appleScriptEscape,
+  DEFAULT_ACTIVATE_BUNDLE,
   DEFAULT_SOUNDS,
   notify,
   playSound,
   readSettingsKey,
+  resolveActivateBundle,
   resolveConfig,
+  resolveNotifierPath,
   resolveSound,
   sanitizeOsc,
   sessionTitle,
+  terminalNotifierArgs,
 } from "../index.js";
 
 test("resolveConfig merges user config over defaults", () => {
@@ -46,7 +50,50 @@ test("resolveConfig applies per-event sound overrides", () => {
 test("resolveConfig accepts alert and rejects other style values", () => {
   assert.equal(resolveConfig({ style: "alert" }).style, "alert");
   assert.equal(resolveConfig({ style: "ALERT" }).style, "alert");
+  assert.equal(resolveConfig({ style: "notifier" }).style, "notifier");
+  assert.equal(resolveConfig({ style: "NOTIFIER" }).style, "notifier");
   assert.equal(resolveConfig({ style: "sticky" }).style, "banner");
+});
+
+test("resolveConfig keeps activateBundle and notifierPath when set", () => {
+  const cfg = resolveConfig({ activateBundle: "com.example.term", notifierPath: "/usr/local/bin/tn" });
+  assert.equal(cfg.activateBundle, "com.example.term");
+  assert.equal(cfg.notifierPath, "/usr/local/bin/tn");
+  assert.equal(resolveConfig({}).activateBundle, undefined);
+  assert.equal(resolveConfig({ activateBundle: "  " }).activateBundle, undefined);
+  assert.equal(resolveConfig({ notifierPath: 42 }).notifierPath, undefined);
+});
+
+test("resolveActivateBundle prefers config, then TERM_PROGRAM, then Ghostty", () => {
+  assert.equal(resolveActivateBundle("com.custom.term", "ghostty"), "com.custom.term");
+  assert.equal(resolveActivateBundle(undefined, "iTerm.app"), "com.googlecode.iterm2");
+  assert.equal(resolveActivateBundle(undefined, "Apple_Terminal"), "com.apple.Terminal");
+  assert.equal(resolveActivateBundle(undefined, "WezTerm"), "com.github.wez.wezterm");
+  assert.equal(resolveActivateBundle(undefined, "ghostty"), "com.mitchellh.ghostty");
+  assert.equal(resolveActivateBundle(undefined, "unknown-term"), DEFAULT_ACTIVATE_BUNDLE);
+  assert.equal(resolveActivateBundle(undefined, undefined), DEFAULT_ACTIVATE_BUNDLE);
+  assert.equal(resolveActivateBundle(undefined, "vscode"), "com.microsoft.VSCode");
+});
+
+test("resolveNotifierPath probes configured then Homebrew prefixes", () => {
+  const lookup = (p) => (p === "/opt/homebrew/bin/terminal-notifier" ? p : false);
+  assert.equal(resolveNotifierPath(undefined, lookup), "/opt/homebrew/bin/terminal-notifier");
+  assert.equal(resolveNotifierPath("/x/tn", lookup), false);
+  assert.equal(resolveNotifierPath("/x/tn", (p) => (p === "/x/tn" ? p : false)), "/x/tn");
+  assert.equal(resolveNotifierPath(undefined, () => false), false);
+  assert.equal(resolveNotifierPath("  ", lookup), "/opt/homebrew/bin/terminal-notifier");
+});
+
+test("terminalNotifierArgs builds a click-to-activate argv", () => {
+  assert.deepEqual(terminalNotifierArgs("PoC - pi-notify", "Task complete", {
+    termProgram: "ghostty",
+  }), ["-title", "PoC - pi-notify", "-message", "Task complete", "-activate", "com.mitchellh.ghostty"]);
+  assert.deepEqual(terminalNotifierArgs("t", "b", { activateBundle: "com.custom" }), [
+    "-title", "t", "-message", "b", "-activate", "com.custom",
+  ]);
+  const io = { activateBundle: "" };
+  delete io.activateBundle;
+  assert.ok(terminalNotifierArgs("t", "b", io).includes("-activate"));
 });
 
 test("resolveConfig keeps boolean defaults when a flag is not a boolean", () => {
@@ -119,6 +166,7 @@ test("compaction delivery uses Notification Center and skips Ghostty OSC", () =>
   notify("PoC - pi-notify", "Compaction complete", {
     style: "banner",
     delivery: "center",
+    notifierLookup: () => false,
     write() { throw new Error("osc"); },
     run: (cmd, args) => runs.push([cmd, args]),
   });
@@ -127,11 +175,76 @@ test("compaction delivery uses Notification Center and skips Ghostty OSC", () =>
   assert.match(runs[0][1][1], /display notification "Compaction complete"/);
 });
 
-test("banner with no terminal uses Notification Center and escapes quotes", () => {
+test("center delivery prefers terminal-notifier so a click activates the terminal", () => {
+  const runs = [];
+  notify("PoC - pi-notify", "Compaction complete", {
+    style: "banner",
+    delivery: "center",
+    termProgram: "ghostty",
+    notifierLookup: (p) => p,
+    write() { throw new Error("osc"); },
+    run: (cmd, args) => runs.push([cmd, args]),
+  });
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0][0], "/opt/homebrew/bin/terminal-notifier");
+  assert.deepEqual(runs[0][1], [
+    "-title", "PoC - pi-notify", "-message", "Compaction complete",
+    "-activate", "com.mitchellh.ghostty",
+  ]);
+});
+
+test("notifier style always routes through terminal-notifier", () => {
+  const runs = [];
+  let written = 0;
+  notify("PoC - pi-notify", "Task complete", {
+    style: "notifier",
+    termProgram: "ghostty",
+    notifierLookup: (p) => p,
+    write: () => { written += 1; return true; },
+    run: (cmd, args) => runs.push([cmd, args]),
+  });
+  assert.equal(written, 0);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0][0], "/opt/homebrew/bin/terminal-notifier");
+  assert.deepEqual(runs[0][1], [
+    "-title", "PoC - pi-notify", "-message", "Task complete",
+    "-activate", "com.mitchellh.ghostty",
+  ]);
+});
+
+test("notifier style falls back to the OSC banner without terminal-notifier", () => {
+  const chunks = [];
+  const runs = [];
+  notify("Hi", "done", {
+    style: "notifier",
+    notifierLookup: () => false,
+    write: (s) => { chunks.push(s); return true; },
+    run: (cmd, args) => runs.push([cmd, args]),
+  });
+  assert.equal(chunks.length, 1);
+  assert.equal(runs.length, 0);
+});
+
+test("banner with no terminal prefers terminal-notifier and activates the terminal on click", () => {
   if (process.platform !== "darwin") return;
   const runs = [];
   notify('Say "hi"', "a\\b", {
     write: () => false,
+    notifierLookup: (p) => p,
+    run: (cmd, args) => runs.push([cmd, args]),
+  });
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0][0], "/opt/homebrew/bin/terminal-notifier");
+  assert.ok(runs[0][1].includes("-activate"));
+  assert.ok(!runs[0][1].includes("-e"));
+});
+
+test("banner with no terminal falls back to osascript and escapes quotes", () => {
+  if (process.platform !== "darwin") return;
+  const runs = [];
+  notify('Say "hi"', "a\\b", {
+    write: () => false,
+    notifierLookup: () => false,
     run: (cmd, args) => runs.push([cmd, args]),
   });
   assert.equal(runs.length, 1);

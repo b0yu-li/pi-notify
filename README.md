@@ -26,11 +26,27 @@ pi --extension ./extensions/index.js
 
 | `style` | What you see / hear |
 |---------|----------------|
-| `banner` (default) | OSC 777 on this process's terminal only, so Ghostty shows the current session. Notification Center is used only when this process has no terminal. Both go away on their own. |
+| `banner` (default) | OSC 777 on this process's terminal only, so Ghostty shows the current session. Notification Center is used only when this process has no terminal (or for a finished `/compact`), via `terminal-notifier` when installed so a click focuses this app. Both go away on their own. |
+| `notifier` | Never uses OSC: every notice goes through `terminal-notifier` with `-activate`, so clicking a notification always brings Ghostty to the foreground. Opt in when Ghostty's own click-to-focus misbehaves (see below). |
 | `alert` | A macOS alert dialog that stays until you click OK. |
 | `sound` on | `afplay` of a per-event system sound: `Glass` (complete), `Basso` (error), `Ping` (question) |
 
 In Ghostty, set `desktop-notifications = true` (the usual default) so banner-style OSC 777 reaches Notification Center. macOS chooses banner versus alert per app in System Settings, not per notice, so `alert` uses a dialog that actually stays instead of Ghostty. This path is macOS-only; other platforms do nothing.
+
+## Clicking a notification
+
+Ghostty's own click-to-focus (the `banner` path) has known blind spots:
+
+- **Split panes**: in Ghostty 1.3.1, clicking a notification from a split pane opens a new window instead of focusing the originating pane ([ghostty#10444](https://github.com/ghostty-org/ghostty/issues/10444), fixed after 1.3.1). Upgrade Ghostty to ≥ 1.4.0.
+- **Quick terminal**: notifications from a quick-terminal surface cannot be click-focused at all — Ghostty's surface lookup does not scan it.
+- **Fullscreen Spaces**: `makeKeyAndOrderFront` does not always switch to the right fullscreen Space.
+
+To make a click always bring Ghostty to the foreground regardless of these, install [terminal-notifier](https://github.com/julienXX/terminal-notifier) (`brew install terminal-notifier`) and either:
+
+- set `"style": "notifier"` so every notice routes through it, or
+- keep `"style": "banner"` — the Notification Center fallback (no terminal, `/compact`) then already uses `terminal-notifier -activate com.mitchellh.ghostty` when the binary is present, and falls back to `osascript` otherwise. Note that plain `osascript display notification` notices are attributed to Script Editor and can never activate Ghostty on click.
+
+Without `terminal-notifier`, clicking a `banner`-style notice still focuses the originating Ghostty surface in regular windows (on Ghostty ≥ 1.4.0), because the notification is attached to the terminal surface via OSC 777.
 
 ## Configuration
 
@@ -48,12 +64,16 @@ Put a `notify` object in `.pi/settings.json` (trusted projects only), `$PI_CODIN
       "error": "Basso",
       "question": "Ping"
     },
-    "style": "banner"
+    "style": "banner",
+    "activateBundle": "com.mitchellh.ghostty",
+    "notifierPath": "/opt/homebrew/bin/terminal-notifier"
   }
 }
 ```
 
-`onComplete`, `onError`, `onQuestion`, and `sound` default to `true`. `style` defaults to `"banner"`. Set `"style": "alert"` when the notice should stay until you dismiss it. Omit the object to keep the defaults.
+`onComplete`, `onError`, `onQuestion`, and `sound` default to `true`. `style` defaults to `"banner"`. Set `"style": "alert"` when the notice should stay until you dismiss it, or `"style": "notifier"` to always route through `terminal-notifier`. Omit the object to keep the defaults.
+
+`activateBundle` is the bundle id a `terminal-notifier` click activates. It defaults to Ghostty (`com.mitchellh.ghostty`), or the running terminal via `TERM_PROGRAM` (`iTerm.app`, `Apple_Terminal`, `vscode`, `kitty`, `WezTerm`, `rio`, `Alacritty`, `hyper`). `notifierPath` overrides where the `terminal-notifier` binary is looked up (Homebrew's `/opt/homebrew/bin` and `/usr/local/bin` prefixes are probed otherwise).
 
 `sounds` picks the `afplay` file per event. Use a `/System/Library/Sounds` basename (`"Glass"` or `"Glass.aiff"`) or an absolute path. Defaults are `Glass` / `Basso` / `Ping`.
 

@@ -4,9 +4,11 @@
  * Derived from @bacnh85/pi-notify (MIT). Linux, Windows, Kitty, and volume
  * are removed. Banner: OSC 777 on this process's terminal (stdout when it is
  * a TTY, otherwise /dev/tty). Notification Center when there is no terminal,
- * and for a finished `/compact` (Ghostty drops OSC during the redraw). Alert:
- * an osascript dialog. Sound: afplay of a per-event macOS system sound
- * (Glass / Basso / Ping by default).
+ * and for a finished `/compact` (Ghostty drops OSC during the redraw) — via
+ * terminal-notifier with `-activate` when installed, so a click focuses the
+ * terminal, else osascript. Style "notifier" always routes through
+ * terminal-notifier for click-to-foreground. Alert: an osascript dialog.
+ * Sound: afplay of a per-event macOS system sound (Glass / Basso / Ping).
  *
  * Handlers only observe lifecycle events. They never call sendMessage,
  * sendUserMessage, appendEntry, or registerTool.
@@ -14,7 +16,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { closeSync, openSync, readFileSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, openSync, readFileSync, writeSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import { isatty } from "node:tty";
 import os from "node:os";
@@ -28,6 +30,28 @@ const DEFAULTS = {
 };
 
 const SOUNDS_DIR = "/System/Library/Sounds";
+
+/** Clicking a Notification Center notice activates this app by default. */
+export const DEFAULT_ACTIVATE_BUNDLE = "com.mitchellh.ghostty";
+
+/** TERM_PROGRAM → bundle id, so `-activate` targets the running terminal. */
+export const TERMINAL_BUNDLES = {
+  ghostty: "com.mitchellh.ghostty",
+  "iterm.app": "com.googlecode.iterm2",
+  apple_terminal: "com.apple.Terminal",
+  vscode: "com.microsoft.VSCode",
+  kitty: "net.kovidgoyal.kitty",
+  wezterm: "com.github.wez.wezterm",
+  rio: "com.raphaelamorim.rio",
+  alacritty: "org.alacritty",
+  hyper: "co.zeit.Hyper",
+};
+
+/** terminal-notifier ships in Homebrew's two prefixes. */
+const DEFAULT_NOTIFIER_PATHS = [
+  "/opt/homebrew/bin/terminal-notifier",
+  "/usr/local/bin/terminal-notifier",
+];
 
 /** Default afplay targets per event kind. */
 export const DEFAULT_SOUNDS = {
@@ -60,9 +84,12 @@ export function readSettingsKey(cwd, key, trusted = false) {
   return undefined;
 }
 
-/** "alert" stays until dismissed. Anything else is a banner. */
+/** "alert" stays until dismissed, "notifier" uses terminal-notifier. Anything else is a banner. */
 export function normalizeStyle(value) {
-  return String(value ?? "").trim().toLowerCase() === "alert" ? "alert" : "banner";
+  const style = String(value ?? "").trim().toLowerCase();
+  if (style === "alert") return "alert";
+  if (style === "notifier") return "notifier";
+  return "banner";
 }
 
 /**
@@ -94,6 +121,35 @@ export function resolveSound(value, fallback) {
   return join(SOUNDS_DIR, name);
 }
 
+/** Resolve the bundle id `-activate` should target on click. */
+export function resolveActivateBundle(configured, termProgram) {
+  if (typeof configured === "string" && configured.trim()) return configured.trim();
+  const key = String(termProgram ?? process.env.TERM_PROGRAM ?? "").trim().toLowerCase();
+  return TERMINAL_BUNDLES[key] ?? DEFAULT_ACTIVATE_BUNDLE;
+}
+
+function defaultNotifierLookup(path) {
+  try {
+    accessSync(path, constants.X_OK);
+    return path;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find an executable terminal-notifier. `notifierPath` config wins; otherwise
+ * Homebrew's prefixes are probed. Returns false when there is no binary.
+ */
+export function resolveNotifierPath(configured, lookup = defaultNotifierLookup) {
+  const trimmed = typeof configured === "string" ? configured.trim() : "";
+  for (const path of trimmed ? [trimmed] : DEFAULT_NOTIFIER_PATHS) {
+    const found = lookup(path);
+    if (found) return found;
+  }
+  return false;
+}
+
 function resolveSounds(userSounds) {
   const extra = userSounds && typeof userSounds === "object" && !Array.isArray(userSounds)
     ? userSounds
@@ -114,6 +170,12 @@ export function resolveConfig(user) {
     sound: pickBool(extra.sound, DEFAULTS.sound),
     sounds: resolveSounds(extra.sounds),
     style: normalizeStyle(extra.style),
+    activateBundle: typeof extra.activateBundle === "string" && extra.activateBundle.trim()
+      ? extra.activateBundle.trim()
+      : undefined,
+    notifierPath: typeof extra.notifierPath === "string" && extra.notifierPath.trim()
+      ? extra.notifierPath.trim()
+      : undefined,
   };
 }
 
@@ -146,6 +208,17 @@ function notificationScript(title, body) {
   return `display notification "${appleScriptEscape(body)}" with title "${appleScriptEscape(title)}"`;
 }
 
+/**
+ * terminal-notifier argv. `-activate` makes a click bring the terminal app to
+ * the foreground, which Ghostty's own click-to-focus cannot always do.
+ */
+export function terminalNotifierArgs(title, body, io = {}) {
+  const args = ["-title", String(title), "-message", String(body)];
+  const bundle = resolveActivateBundle(io.activateBundle, io.termProgram);
+  if (bundle) args.push("-activate", bundle);
+  return args;
+}
+
 /** This process's terminal only. False when there isn't one. */
 function writeOsc(payload) {
   if (process.stdout?.isTTY) {
@@ -171,7 +244,9 @@ function writeOsc(payload) {
  * Notify on macOS. `io.write(payload)` delivers a banner and returns true
  * when the terminal accepted it. Alert stays up via `display alert` (no
  * process timeout). `delivery: "center"` and a failed write use Notification
- * Center.
+ * Center, preferring terminal-notifier with `-activate` so a click focuses
+ * the terminal; osascript notifications are attributed to Script Editor and
+ * never activate the terminal on click.
  */
 export function notify(title, body, io = {}) {
   if (process.platform !== "darwin") return;
@@ -183,7 +258,15 @@ export function notify(title, body, io = {}) {
       run("osascript", ["-e", script], { timeout: 0 });
       return;
     }
+    const notifierPath = resolveNotifierPath(io.notifierPath, io.notifierLookup);
+    const viaNotifier = (style) => {
+      if (!notifierPath) return false;
+      run(notifierPath, terminalNotifierArgs(title, body, io), { timeout: 10000 });
+      return true;
+    };
+    if (normalizeStyle(io.style) === "notifier" && viaNotifier()) return;
     if (io.delivery === "center" || !write(oscPayload(title, body))) {
+      if (viaNotifier()) return;
       run("osascript", ["-e", notificationScript(title, body)]);
     }
   } catch {
@@ -238,7 +321,14 @@ export default function notifyExtension(pi, opts = {}) {
       if (kind === "complete" && !cfg.onComplete) return;
       if (kind === "error" && !cfg.onError) return;
       if (kind === "question" && !cfg.onQuestion) return;
-      try { doNotify(title, body, { style: cfg.style, ...extra }); } catch { /* best-effort */ }
+      try {
+        doNotify(title, body, {
+          style: cfg.style,
+          activateBundle: cfg.activateBundle,
+          notifierPath: cfg.notifierPath,
+          ...extra,
+        });
+      } catch { /* best-effort */ }
       if (cfg.sound) {
         const sound = cfg.sounds?.[kind] ?? DEFAULT_SOUNDS.complete;
         try { doSound({ sound }); } catch { /* best-effort */ }
