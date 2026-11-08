@@ -65,13 +65,16 @@ Put a `notify` object in `.pi/settings.json` (trusted projects only), `$PI_CODIN
       "question": "Ping"
     },
     "style": "banner",
+    "minDurationMs": 0,
     "activateBundle": "com.mitchellh.ghostty",
     "notifierPath": "/opt/homebrew/bin/terminal-notifier"
   }
 }
 ```
 
-`onComplete`, `onError`, `onQuestion`, and `sound` default to `true`. `style` defaults to `"banner"`. Set `"style": "alert"` when the notice should stay until you dismiss it, or `"style": "notifier"` to always route through `terminal-notifier`. Omit the object to keep the defaults.
+`onComplete`, `onError`, `onQuestion`, and `sound` default to `true`. `style` defaults to `"banner"`. Set `"style": "alert"` when the notice should stay until you dismiss it, or `"style": "notifier"` to always route through `terminal-notifier`. `minDurationMs` (default `0`) silences the completion notice for runs that finished faster than the given milliseconds — raise it (e.g. `10000`) when short replies chime too often. Omit the object to keep the defaults.
+
+Settings are re-read at each `session_start`; run `/reload` after editing them mid-session.
 
 `activateBundle` is the bundle id a `terminal-notifier` click activates. It defaults to Ghostty (`com.mitchellh.ghostty`), or the running terminal via `TERM_PROGRAM` (`iTerm.app`, `Apple_Terminal`, `vscode`, `kitty`, `WezTerm`, `rio`, `Alacritty`, `hyper`). `notifierPath` overrides where the `terminal-notifier` binary is looked up (Homebrew's `/opt/homebrew/bin` and `/usr/local/bin` prefixes are probed otherwise).
 
@@ -83,6 +86,16 @@ Put a `notify` object in `.pi/settings.json` (trusted projects only), `$PI_CODIN
 
 | Key | Event |
 |-----|--------|
-| `onComplete` | `agent_settled`, after Pi has stopped continuing on its own. The title is the current session name and directory (`PoC - pi-notify`), or just the directory when the session is unnamed. A cancelled run does not send "Task complete". A finished `/compact` sends "Compaction complete" through Notification Center, because Ghostty drops an OSC banner while Pi redraws the summary. Automatic compaction does not, because the turn still ends with "Task complete". |
-| `onError` | First `tool_result` with `isError` in the turn. That turn does not also send "Task complete". A `/compact` that fails (and was not cancelled) sends "Compaction failed" through Notification Center. |
-| `onQuestion` | `ui_prompt_start` (select, confirm, input, editor, custom) |
+| `onComplete` | `agent_settled`, after Pi has stopped continuing on its own. The title is the current session name and directory (`PoC - pi-notify`), or just the directory when the session is unnamed. A cancelled run does not send "Task complete"; neither does a run shorter than `minDurationMs`. A finished `/compact` sends "Compaction complete" through Notification Center, because Ghostty drops an OSC banner while Pi redraws the summary. Automatic compaction does not, because the turn still ends with "Task complete". |
+| `onError` | First top-level `tool_result` with `isError` in the turn. Errors of nested calls (`parentToolCallId` set — codemode scripts, orchestrating tools) are skipped, because the issuing tool reports them in its own result. That turn does not also send "Task complete". A `/compact` that fails (and was not cancelled) sends "Compaction failed" through Notification Center. |
+| `onQuestion` | `ui_prompt_start` (select, confirm, input, editor, custom). This fires for any blocking extension dialog — including confirmation prompts raised by other installed extensions mid-run — not only questions the model asks. |
+
+## Hunting a phantom sound
+
+Every sound traces to one of the events above: `Glass` on completion, `Basso` on a tool error, `Ping` on a question. If you hear one unexpectedly, run Pi with `PI_NOTIFY_DEBUG=1`:
+
+```bash
+PI_NOTIFY_DEBUG=1 pi
+```
+
+Each decision (fired or skipped, and why) is appended to `/tmp/pi-notify.log` (override with `PI_NOTIFY_DEBUG_LOG`). Two sound sources live outside this extension: macOS plays its own tone for a notification when System Settings → Notifications → Ghostty has "Play sound for notifications" enabled, and other extensions' dialogs trigger the `onQuestion` ping mid-run.

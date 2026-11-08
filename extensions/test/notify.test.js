@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -450,6 +450,88 @@ test("each event kind plays its own default sound", () => {
     DEFAULT_SOUNDS.error,
     DEFAULT_SOUNDS.question,
   ]);
+});
+
+test("automatic compaction (threshold/overflow) stays quiet", () => {
+  const calls = [];
+  const sounds = [];
+  const handlers = harness({ notifySpy: (_t, body) => calls.push(body), soundSpy: (io) => sounds.push(io?.sound) });
+  handlers.session_compact({ reason: "threshold", willRetry: false });
+  handlers.session_compact({ reason: "overflow", willRetry: true });
+  handlers.session_compact_failed({ reason: "threshold", willRetry: false });
+  handlers.session_compact_failed({ reason: "overflow", willRetry: true });
+  handlers.session_compact_failed({ reason: "manual", aborted: true });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(sounds, []);
+});
+
+test("aborted runs and errored turns do not send Task complete", () => {
+  const calls = [];
+  const handlers = harness({ notifySpy: (_t, body) => calls.push(body) });
+  handlers.agent_settled({ aborted: true });
+  handlers.turn_start();
+  handlers.tool_result({ isError: true });
+  handlers.agent_settled({ aborted: false });
+  assert.deepEqual(calls, ["An error occurred"]);
+});
+
+test("nested tool errors (parentToolCallId) do not fire the error sound", () => {
+  const calls = [];
+  const handlers = harness({ notifySpy: (_t, body) => calls.push(body) });
+  handlers.tool_result({ isError: true, toolCallId: "t1/1", parentToolCallId: "t1" });
+  handlers.agent_settled({ aborted: false });
+  assert.deepEqual(calls, ["Task complete"]);
+});
+
+test("minDurationMs suppresses Task complete for short runs only", async () => {
+  const calls = [];
+  const handlers = harness({ notifySpy: (_t, body) => calls.push(body) });
+  const dir = mkdtempSync(join(tmpdir(), "pi-notify-"));
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ notify: { minDurationMs: 60000 } }));
+  handlers.session_start({}, { cwd: dir, isProjectTrusted: () => true });
+  // A short run: agent_start then settle well under the threshold.
+  handlers.agent_start();
+  handlers.agent_settled({ aborted: false });
+  assert.deepEqual(calls, []);
+  // Errors and questions ignore the threshold.
+  handlers.tool_result({ isError: true });
+  handlers.ui_prompt_start({ title: "Pick" });
+  assert.deepEqual(calls, ["An error occurred", "Question: Pick"]);
+  // A fresh run is still inside the threshold, so it stays quiet too.
+  handlers.agent_start();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  handlers.agent_settled({ aborted: false });
+  assert.deepEqual(calls, ["An error occurred", "Question: Pick"]);
+});
+
+test("resolveConfig accepts minDurationMs and rejects junk", () => {
+  assert.equal(resolveConfig({ minDurationMs: 10000 }).minDurationMs, 10000);
+  assert.equal(resolveConfig({ minDurationMs: -5 }).minDurationMs, 0);
+  assert.equal(resolveConfig({ minDurationMs: "soon" }).minDurationMs, 0);
+  assert.equal(resolveConfig({}).minDurationMs, 0);
+});
+
+test("PI_NOTIFY_DEBUG=1 logs every fire and skip decision", () => {
+  const log = mkdtempSync(join(tmpdir(), "pi-notify-log-")) + "/debug.log";
+  const prevDebug = process.env.PI_NOTIFY_DEBUG;
+  const prevPath = process.env.PI_NOTIFY_DEBUG_LOG;
+  process.env.PI_NOTIFY_DEBUG = "1";
+  process.env.PI_NOTIFY_DEBUG_LOG = log;
+  try {
+    const handlers = harness({});
+    handlers.agent_settled({ aborted: true });
+    handlers.agent_settled({ aborted: false });
+    const lines = readFileSync(log, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /skip kind=complete why=aborted/);
+    assert.match(lines[1], /fire kind=complete style=banner .*body="Task complete"/);
+  } finally {
+    if (prevDebug === undefined) delete process.env.PI_NOTIFY_DEBUG;
+    else process.env.PI_NOTIFY_DEBUG = prevDebug;
+    if (prevPath === undefined) delete process.env.PI_NOTIFY_DEBUG_LOG;
+    else process.env.PI_NOTIFY_DEBUG_LOG = prevPath;
+  }
 });
 
 test("readSettingsKey ignores untrusted project settings and reads global", () => {

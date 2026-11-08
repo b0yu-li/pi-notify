@@ -9,6 +9,8 @@
  * terminal, else osascript. Style "notifier" always routes through
  * terminal-notifier for click-to-foreground. Alert: an osascript dialog.
  * Sound: afplay of a per-event macOS system sound (Glass / Basso / Ping).
+ * `minDurationMs` keeps short runs silent; PI_NOTIFY_DEBUG=1 logs every decision
+ * to /tmp/pi-notify.log.
  *
  * Handlers only observe lifecycle events. They never call sendMessage,
  * sendUserMessage, appendEntry, or registerTool.
@@ -16,7 +18,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { accessSync, closeSync, constants, openSync, readFileSync, writeSync } from "node:fs";
+import { accessSync, appendFileSync, closeSync, constants, openSync, readFileSync, writeSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import { isatty } from "node:tty";
 import os from "node:os";
@@ -27,7 +29,18 @@ const DEFAULTS = {
   onQuestion: true,
   sound: true,
   style: "banner",
+  minDurationMs: 0,
 };
+/** PI_NOTIFY_DEBUG=1 appends one line per decision to this file. */
+function debugLog(line) {
+  if (!/^(1|true)$/i.test(process.env.PI_NOTIFY_DEBUG ?? "")) return;
+  try {
+    const path = process.env.PI_NOTIFY_DEBUG_LOG || "/tmp/pi-notify.log";
+    appendFileSync(path, `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    // diagnostics must never break a handler
+  }
+}
 
 const SOUNDS_DIR = "/System/Library/Sounds";
 
@@ -163,6 +176,10 @@ function resolveSounds(userSounds) {
 
 export function resolveConfig(user) {
   const extra = user && typeof user === "object" && !Array.isArray(user) ? user : {};
+  const minDurationMs = typeof extra.minDurationMs === "number"
+    && Number.isFinite(extra.minDurationMs) && extra.minDurationMs >= 0
+    ? extra.minDurationMs
+    : DEFAULTS.minDurationMs;
   return {
     onComplete: pickBool(extra.onComplete, DEFAULTS.onComplete),
     onError: pickBool(extra.onError, DEFAULTS.onError),
@@ -170,6 +187,7 @@ export function resolveConfig(user) {
     sound: pickBool(extra.sound, DEFAULTS.sound),
     sounds: resolveSounds(extra.sounds),
     style: normalizeStyle(extra.style),
+    minDurationMs,
     activateBundle: typeof extra.activateBundle === "string" && extra.activateBundle.trim()
       ? extra.activateBundle.trim()
       : undefined,
@@ -282,7 +300,8 @@ export function playSound(io = {}) {
   if (process.platform !== "darwin") return;
   const file = typeof io.sound === "string" && io.sound ? io.sound : DEFAULT_SOUNDS.complete;
   try {
-    (io.run ?? defaultRun)("afplay", [file]);
+    // 30s: a custom sound longer than the old 5s default was cut off mid-play.
+    (io.run ?? defaultRun)("afplay", [file], { timeout: 30000 });
   } catch {
     // best-effort
   }
@@ -315,12 +334,20 @@ export default function notifyExtension(pi, opts = {}) {
     }
   };
 
-  const fire = (title, body, kind, extra) => {
+  const fire = (title, body, kind, extra = {}) => {
     try {
-      if (noNotify) return;
-      if (kind === "complete" && !cfg.onComplete) return;
-      if (kind === "error" && !cfg.onError) return;
-      if (kind === "question" && !cfg.onQuestion) return;
+      const skip = (why) => debugLog(`skip kind=${kind} why=${why} body="${body}"`);
+      if (noNotify) return skip("--no-notify");
+      if (kind === "complete" && !cfg.onComplete) return skip("onComplete=false");
+      if (kind === "error" && !cfg.onError) return skip("onError=false");
+      if (kind === "question" && !cfg.onQuestion) return skip("onQuestion=false");
+      if (kind === "complete" && cfg.minDurationMs > 0) {
+        const elapsed = runStartedAt === undefined
+          ? Number.POSITIVE_INFINITY
+          : Date.now() - runStartedAt;
+        if (elapsed < cfg.minDurationMs) return skip(`minDurationMs elapsed=${elapsed}`);
+      }
+      debugLog(`fire kind=${kind} style=${cfg.style} delivery=${extra.delivery ?? "auto"} body="${body}"`);
       try {
         doNotify(title, body, {
           style: cfg.style,
@@ -339,6 +366,7 @@ export default function notifyExtension(pi, opts = {}) {
   };
 
   let erroredThisTurn = false;
+  let runStartedAt;
   let sessionName;
   let sessionCwd;
 
@@ -355,8 +383,14 @@ export default function notifyExtension(pi, opts = {}) {
     }
   };
 
+  pi.on("agent_start", () => {
+    runStartedAt = Date.now();
+  });
   pi.on("agent_settled", (event, ctx) => {
-    if (erroredThisTurn || event?.aborted) return;
+    if (erroredThisTurn || event?.aborted) {
+      debugLog(`skip kind=complete why=${event?.aborted ? "aborted" : "erroredThisTurn"}`);
+      return;
+    }
     if (ctx) rememberSession(ctx);
     fire(titleForSession(), "Task complete", "complete");
   });
@@ -394,6 +428,12 @@ export default function notifyExtension(pi, opts = {}) {
     if (ctx) rememberSession(ctx);
     if (erroredThisTurn) return;
     if (!event?.isError) return;
+    // Nested calls (codemode scripts, orchestrators) report through the
+    // issuing tool's own result; the inner failure alone is not user-facing.
+    if (event.parentToolCallId) {
+      debugLog(`skip kind=error why=nested toolCallId=${event.toolCallId}`);
+      return;
+    }
     if (!noNotify && cfg.onError) erroredThisTurn = true;
     fire(titleForSession(), "An error occurred", "error");
   });
