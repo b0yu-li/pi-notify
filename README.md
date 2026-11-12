@@ -65,6 +65,7 @@ Put a `notify` object in `.pi/settings.json` (trusted projects only), `$PI_CODIN
       "question": "Ping"
     },
     "style": "banner",
+    "errorStyle": "volatile",
     "minDurationMs": 0,
     "activateBundle": "com.mitchellh.ghostty",
     "notifierPath": "/opt/homebrew/bin/terminal-notifier"
@@ -72,7 +73,7 @@ Put a `notify` object in `.pi/settings.json` (trusted projects only), `$PI_CODIN
 }
 ```
 
-`onComplete`, `onError`, `onQuestion`, and `sound` default to `true`. `style` defaults to `"banner"`. Set `"style": "alert"` when the notice should stay until you dismiss it, or `"style": "notifier"` to always route through `terminal-notifier`. `minDurationMs` (default `0`) silences the completion notice for runs that finished faster than the given milliseconds — raise it (e.g. `10000`) when short replies chime too often. Omit the object to keep the defaults.
+`onComplete`, `onError`, `onQuestion`, and `sound` default to `true`. `style` defaults to `"banner"`. Set `"style": "alert"` when the notice should stay until you dismiss it, or `"style": "notifier"` to always route through `terminal-notifier`. `errorStyle` (default `"volatile"`) controls error notices only: `"volatile"` delivers them as the OSC 777 terminal banner, which Ghostty withdraws the moment the terminal regains focus, and drops them silently when there is no terminal — nothing lingers in Notification Center history. Set `"errorStyle": "persistent"` to restore the old behavior, where an error falls back to Notification Center (or, when there is no terminal at all, is delivered there directly). Note that the volatile banner for a failed `/compact` can be lost while Pi redraws — the same Ghostty redraw that made "Compaction complete" use Notification Center; `"persistent"` avoids that too. `minDurationMs` (default `0`) silences the completion notice for runs that finished faster than the given milliseconds — raise it (e.g. `10000`) when short replies chime too often. Omit the object to keep the defaults.
 
 Settings are re-read at each `session_start`; run `/reload` after editing them mid-session.
 
@@ -87,7 +88,7 @@ Settings are re-read at each `session_start`; run `/reload` after editing them m
 | Key | Event |
 |-----|--------|
 | `onComplete` | `agent_settled`, after Pi has stopped continuing on its own. The title is the current session name and directory (`PoC - pi-notify`), or just the directory when the session is unnamed. A cancelled run does not send "Task complete"; neither does a run shorter than `minDurationMs`. A finished `/compact` sends "Compaction complete" through Notification Center, because Ghostty drops an OSC banner while Pi redraws the summary. Automatic compaction does not, because the turn still ends with "Task complete". |
-| `onError` | First top-level `tool_result` with `isError` in the turn. Errors of nested calls (`parentToolCallId` set — codemode scripts, orchestrating tools) are skipped, because the issuing tool reports them in its own result. That turn does not also send "Task complete". A `/compact` that fails (and was not cancelled) sends "Compaction failed" through Notification Center. |
+| `onError` | First top-level `tool_result` with `isError` in the turn. Errors of nested calls (`parentToolCallId` set — codemode scripts, orchestrating tools) are skipped, because the issuing tool reports them in its own result. That turn does not also send "Task complete". A `/compact` that fails (and was not cancelled) sends "Compaction failed" — volatile by default (`errorStyle`), through Notification Center with `"errorStyle": "persistent"`. |
 | `onQuestion` | `ui_prompt_start` (select, confirm, input, editor, custom). This fires for any blocking extension dialog — including confirmation prompts raised by other installed extensions mid-run — not only questions the model asks. |
 
 ## Hunting a phantom sound

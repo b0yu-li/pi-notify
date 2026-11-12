@@ -7,7 +7,9 @@
  * and for a finished `/compact` (Ghostty drops OSC during the redraw) — via
  * terminal-notifier with `-activate` when installed, so a click focuses the
  * terminal, else osascript. Style "notifier" always routes through
- * terminal-notifier for click-to-foreground. Alert: an osascript dialog.
+ * terminal-notifier for click-to-foreground. Error notices are volatile by
+ * default (`errorStyle`): an OSC 777 banner that Ghostty withdraws on focus,
+ * never a persistent Notification Center notice. Alert: an osascript dialog.
  * Sound: afplay of a per-event macOS system sound (Glass / Basso / Ping).
  * `minDurationMs` keeps short runs silent; PI_NOTIFY_DEBUG=1 logs every decision
  * to /tmp/pi-notify.log.
@@ -29,6 +31,7 @@ const DEFAULTS = {
   onQuestion: true,
   sound: true,
   style: "banner",
+  errorStyle: "volatile",
   minDurationMs: 0,
 };
 /** PI_NOTIFY_DEBUG=1 appends one line per decision to this file. */
@@ -103,6 +106,16 @@ export function normalizeStyle(value) {
   if (style === "alert") return "alert";
   if (style === "notifier") return "notifier";
   return "banner";
+}
+
+/**
+ * Error delivery. "persistent" keeps the Notification Center fallback for
+ * error notices (the old behavior); anything else is "volatile": the OSC 777
+ * banner only, which Ghostty withdraws when the terminal regains focus, so
+ * errors never sit in Notification Center history.
+ */
+export function normalizeErrorStyle(value) {
+  return String(value ?? "").trim().toLowerCase() === "persistent" ? "persistent" : "volatile";
 }
 
 /**
@@ -187,6 +200,7 @@ export function resolveConfig(user) {
     sound: pickBool(extra.sound, DEFAULTS.sound),
     sounds: resolveSounds(extra.sounds),
     style: normalizeStyle(extra.style),
+    errorStyle: normalizeErrorStyle(extra.errorStyle),
     minDurationMs,
     activateBundle: typeof extra.activateBundle === "string" && extra.activateBundle.trim()
       ? extra.activateBundle.trim()
@@ -260,9 +274,11 @@ function writeOsc(payload) {
 
 /**
  * Notify on macOS. `io.write(payload)` delivers a banner and returns true
- * when the terminal accepted it. Alert stays up via `display alert` (no
- * process timeout). `delivery: "center"` and a failed write use Notification
- * Center, preferring terminal-notifier with `-activate` so a click focuses
+ * when the terminal accepted it. `io.volatile` restricts the notice to that
+ * banner: no alert dialog, no terminal-notifier, no Notification Center — a
+ * failed write is dropped instead of falling back. Alert stays up via
+ * `display alert` (no process timeout). `delivery: "center"` and a failed
+ * write otherwise use Notification Center, preferring terminal-notifier with `-activate` so a click focuses
  * the terminal; osascript notifications are attributed to Script Editor and
  * never activate the terminal on click.
  */
@@ -271,6 +287,13 @@ export function notify(title, body, io = {}) {
   const run = io.run ?? defaultRun;
   const write = io.write ?? writeOsc;
   try {
+    // Volatile: the terminal banner only. Ghostty withdraws it on focus, so
+    // nothing lingers in Notification Center history. Overrides every other
+    // style — "alert" and "notifier" are persistent by definition.
+    if (io.volatile) {
+      write(oscPayload(title, body));
+      return;
+    }
     if (normalizeStyle(io.style) === "alert") {
       const script = `display alert "${appleScriptEscape(title)}" message "${appleScriptEscape(body)}"`;
       run("osascript", ["-e", script], { timeout: 0 });
@@ -347,13 +370,18 @@ export default function notifyExtension(pi, opts = {}) {
           : Date.now() - runStartedAt;
         if (elapsed < cfg.minDurationMs) return skip(`minDurationMs elapsed=${elapsed}`);
       }
-      debugLog(`fire kind=${kind} style=${cfg.style} delivery=${extra.delivery ?? "auto"} body="${body}"`);
+      const volatileError = kind === "error" && cfg.errorStyle === "volatile";
+      debugLog(
+        `fire kind=${kind} style=${cfg.style} errorStyle=${cfg.errorStyle}`
+        + ` delivery=${volatileError ? "volatile" : extra.delivery ?? "auto"} body="${body}"`,
+      );
       try {
         doNotify(title, body, {
           style: cfg.style,
           activateBundle: cfg.activateBundle,
           notifierPath: cfg.notifierPath,
           ...extra,
+          ...(volatileError ? { volatile: true } : {}),
         });
       } catch { /* best-effort */ }
       if (cfg.sound) {
@@ -417,6 +445,8 @@ export default function notifyExtension(pi, opts = {}) {
   pi.on("session_compact_failed", (event, ctx) => {
     if (ctx) rememberSession(ctx);
     if (event?.reason !== "manual" || event?.aborted) return;
+    // `delivery: "center"` is what volatile errors (the default) override;
+    // `errorStyle: "persistent"` keeps the old Notification Center notice.
     fire(titleForSession(), "Compaction failed", "error", { delivery: "center" });
   });
 

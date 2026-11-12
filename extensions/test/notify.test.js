@@ -47,6 +47,42 @@ test("resolveConfig applies per-event sound overrides", () => {
   assert.equal(cfg.sounds.question, "/System/Library/Sounds/Tink.aiff");
 });
 
+test("resolveConfig defaults errorStyle to volatile and accepts persistent", () => {
+  assert.equal(resolveConfig({}).errorStyle, "volatile");
+  assert.equal(resolveConfig({ errorStyle: "volatile" }).errorStyle, "volatile");
+  assert.equal(resolveConfig({ errorStyle: "PERSISTENT" }).errorStyle, "persistent");
+  assert.equal(resolveConfig({ errorStyle: "sticky" }).errorStyle, "volatile");
+  assert.equal(resolveConfig({ errorStyle: null }).errorStyle, "volatile");
+});
+
+test("volatile notice writes the OSC banner and never falls back", () => {
+  const chunks = [];
+  const runs = [];
+  notify("PoC - pi-notify", "An error occurred", {
+    volatile: true,
+    style: "alert",
+    delivery: "center",
+    notifierLookup: () => true,
+    write: (s) => { chunks.push(s); return true; },
+    run: (...args) => runs.push(args),
+  });
+  assert.equal(runs.length, 0);
+  assert.equal(chunks.length, 1);
+  assert.equal(chunks[0], "\x1b]777;notify;PoC - pi-notify;An error occurred\x07");
+});
+
+test("volatile notice with no terminal is dropped instead of using Notification Center", () => {
+  const runs = [];
+  notify("PoC - pi-notify", "An error occurred", {
+    volatile: true,
+    delivery: "center",
+    notifierLookup: () => true,
+    write() { return false; },
+    run: (...args) => runs.push(args),
+  });
+  assert.equal(runs.length, 0);
+});
+
 test("resolveConfig accepts alert and rejects other style values", () => {
   assert.equal(resolveConfig({ style: "alert" }).style, "alert");
   assert.equal(resolveConfig({ style: "ALERT" }).style, "alert");
@@ -355,6 +391,43 @@ test("a stale session name keeps the last rename, and a cancelled run stays quie
   handlers.agent_settled({ aborted: false }, ctx);
   handlers.agent_settled({ aborted: true }, ctx);
   assert.deepEqual(calls, [["renamed - pi-notify", "Task complete"]]);
+});
+
+test("errors fire volatile by default and persistently with errorStyle persistent", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-notify-"));
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ notify: { sound: false } }));
+  const calls = [];
+  let handlers = harness({ notifySpy: (_t, _b, io) => calls.push(io) });
+  handlers.session_start({}, { cwd: dir, isProjectTrusted: () => true });
+  handlers.tool_result({ isError: true });
+  assert.equal(calls[0].volatile, true);
+
+  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ notify: { sound: false, errorStyle: "persistent" } }));
+  calls.length = 0;
+  handlers = harness({ notifySpy: (_t, _b, io) => calls.push(io) });
+  handlers.session_start({}, { cwd: dir, isProjectTrusted: () => true });
+  handlers.tool_result({ isError: true });
+  assert.equal(calls[0].volatile, undefined);
+});
+
+test("a failed compaction is volatile by default and forced-center when persistent", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-notify-"));
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ notify: { sound: false } }));
+  const calls = [];
+  let handlers = harness({ notifySpy: (_t, _b, io) => calls.push(io) });
+  handlers.session_start({}, { cwd: dir, isProjectTrusted: () => true });
+  handlers.session_compact_failed({ reason: "manual", aborted: false });
+  assert.equal(calls[0].volatile, true);
+
+  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ notify: { sound: false, errorStyle: "persistent" } }));
+  calls.length = 0;
+  handlers = harness({ notifySpy: (_t, _b, io) => calls.push(io) });
+  handlers.session_start({}, { cwd: dir, isProjectTrusted: () => true });
+  handlers.session_compact_failed({ reason: "manual", aborted: false });
+  assert.equal(calls[0].volatile, undefined);
+  assert.equal(calls[0].delivery, "center");
 });
 
 test("manual /compact notifies when it finishes and stays quiet otherwise", () => {
