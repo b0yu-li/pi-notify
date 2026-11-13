@@ -10,7 +10,8 @@
  * terminal-notifier for click-to-foreground. Error notices are volatile by
  * default (`errorStyle`): an OSC 777 banner that Ghostty withdraws on focus,
  * never a persistent Notification Center notice. Alert: an osascript dialog.
- * Sound: afplay of a per-event macOS system sound (Glass / Basso / Ping).
+ * Sound: afplay of a per-event macOS system sound (Glass / Basso / Ping /
+ * Sosumi).
  * `minDurationMs` keeps short runs silent; PI_NOTIFY_DEBUG=1 logs every decision
  * to /tmp/pi-notify.log.
  *
@@ -29,6 +30,7 @@ const DEFAULTS = {
   onComplete: true,
   onError: true,
   onQuestion: true,
+  onCompact: true,
   sound: true,
   style: "banner",
   errorStyle: "volatile",
@@ -74,6 +76,7 @@ export const DEFAULT_SOUNDS = {
   complete: join(SOUNDS_DIR, "Glass.aiff"),
   error: join(SOUNDS_DIR, "Basso.aiff"),
   question: join(SOUNDS_DIR, "Ping.aiff"),
+  compact: join(SOUNDS_DIR, "Sosumi.aiff"),
 };
 
 /**
@@ -184,6 +187,7 @@ function resolveSounds(userSounds) {
     complete: resolveSound(extra.complete, DEFAULT_SOUNDS.complete),
     error: resolveSound(extra.error, DEFAULT_SOUNDS.error),
     question: resolveSound(extra.question, DEFAULT_SOUNDS.question),
+    compact: resolveSound(extra.compact, DEFAULT_SOUNDS.compact),
   };
 }
 
@@ -197,6 +201,7 @@ export function resolveConfig(user) {
     onComplete: pickBool(extra.onComplete, DEFAULTS.onComplete),
     onError: pickBool(extra.onError, DEFAULTS.onError),
     onQuestion: pickBool(extra.onQuestion, DEFAULTS.onQuestion),
+    onCompact: pickBool(extra.onCompact, DEFAULTS.onCompact),
     sound: pickBool(extra.sound, DEFAULTS.sound),
     sounds: resolveSounds(extra.sounds),
     style: normalizeStyle(extra.style),
@@ -364,6 +369,7 @@ export default function notifyExtension(pi, opts = {}) {
       if (kind === "complete" && !cfg.onComplete) return skip("onComplete=false");
       if (kind === "error" && !cfg.onError) return skip("onError=false");
       if (kind === "question" && !cfg.onQuestion) return skip("onQuestion=false");
+      if (kind === "compact" && !cfg.onCompact) return skip("onCompact=false");
       if (kind === "complete" && cfg.minDurationMs > 0) {
         const elapsed = runStartedAt === undefined
           ? Number.POSITIVE_INFINITY
@@ -385,7 +391,7 @@ export default function notifyExtension(pi, opts = {}) {
         });
       } catch { /* best-effort */ }
       if (cfg.sound) {
-        const sound = cfg.sounds?.[kind] ?? DEFAULT_SOUNDS.complete;
+        const sound = cfg.sounds?.[kind] ?? DEFAULT_SOUNDS[kind] ?? DEFAULT_SOUNDS.complete;
         try { doSound({ sound }); } catch { /* best-effort */ }
       }
     } catch {
@@ -439,7 +445,7 @@ export default function notifyExtension(pi, opts = {}) {
   pi.on("session_compact", (event, ctx) => {
     if (ctx) rememberSession(ctx);
     if (event?.reason !== "manual" || event?.willRetry) return;
-    fire(titleForSession(), "Compaction complete", "complete", { delivery: "center" });
+    fire(titleForSession(), "Compaction complete", "compact", { delivery: "center" });
   });
 
   pi.on("session_compact_failed", (event, ctx) => {

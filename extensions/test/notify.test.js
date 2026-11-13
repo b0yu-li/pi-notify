@@ -432,9 +432,11 @@ test("a failed compaction is volatile by default and forced-center when persiste
 
 test("manual /compact notifies when it finishes and stays quiet otherwise", () => {
   const calls = [];
+  const sounds = [];
   const handlers = harness({
     sessionName: "PoC",
     notifySpy: (title, body, io) => calls.push([title, body, io?.delivery]),
+    soundSpy: (io) => sounds.push(io?.sound),
   });
   const ctx = { cwd: "/Users/boyu/projects/pi-notify", isProjectTrusted: () => false };
   handlers.session_start({}, ctx);
@@ -447,6 +449,7 @@ test("manual /compact notifies when it finishes and stays quiet otherwise", () =
     ["PoC - pi-notify", "Compaction complete", "center"],
     ["PoC - pi-notify", "Compaction failed", "center"],
   ]);
+  assert.deepEqual(sounds, [DEFAULT_SOUNDS.compact, DEFAULT_SOUNDS.error]);
 });
 
 test("tool_result error fires once per turn and suppresses Task complete", () => {
@@ -487,7 +490,20 @@ test("onComplete false suppresses completion; error and question still fire", ()
   handlers.tool_result({ isError: true });
   handlers.session_compact_failed({ reason: "manual", aborted: false });
   handlers.ui_prompt_start({ title: "Choose" });
-  assert.deepEqual(calls, ["An error occurred", "Compaction failed", "Question: Choose"]);
+  assert.deepEqual(calls, ["Compaction complete", "An error occurred", "Compaction failed", "Question: Choose"]);
+});
+
+test("onCompact false suppresses the compaction-complete notice; failure and completion still fire", () => {
+  const calls = [];
+  const handlers = harness({ notifySpy: (_t, body) => calls.push(body) });
+  const dir = mkdtempSync(join(tmpdir(), "pi-notify-"));
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ notify: { onCompact: false, sound: false } }));
+  handlers.session_start({}, { cwd: dir, isProjectTrusted: () => true });
+  handlers.session_compact({ reason: "manual", willRetry: false });
+  handlers.session_compact_failed({ reason: "manual", aborted: false });
+  handlers.agent_settled();
+  assert.deepEqual(calls, ["Compaction failed", "Task complete"]);
 });
 
 test("ui_prompt_start uses a fallback title", () => {
@@ -518,11 +534,14 @@ test("each event kind plays its own default sound", () => {
   handlers.agent_settled();
   handlers.tool_result({ isError: true });
   handlers.ui_prompt_start({ title: "Pick" });
+  handlers.session_compact({ reason: "manual", willRetry: false });
   assert.deepEqual(sounds, [
     DEFAULT_SOUNDS.complete,
     DEFAULT_SOUNDS.error,
     DEFAULT_SOUNDS.question,
+    DEFAULT_SOUNDS.compact,
   ]);
+  assert.notEqual(DEFAULT_SOUNDS.compact, DEFAULT_SOUNDS.complete);
 });
 
 test("automatic compaction (threshold/overflow) stays quiet", () => {
@@ -536,6 +555,19 @@ test("automatic compaction (threshold/overflow) stays quiet", () => {
   handlers.session_compact_failed({ reason: "manual", aborted: true });
   assert.deepEqual(calls, []);
   assert.deepEqual(sounds, []);
+});
+
+test("compaction sounds bypass minDurationMs", () => {
+  const sounds = [];
+  const handlers = harness({ soundSpy: (io) => sounds.push(io?.sound) });
+  const dir = mkdtempSync(join(tmpdir(), "pi-notify-"));
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ notify: { minDurationMs: 600000 } }));
+  handlers.session_start({}, { cwd: dir, isProjectTrusted: () => true });
+  handlers.agent_start();
+  handlers.agent_settled();
+  handlers.session_compact({ reason: "manual", willRetry: false });
+  assert.deepEqual(sounds, [DEFAULT_SOUNDS.compact]);
 });
 
 test("aborted runs and errored turns do not send Task complete", () => {
